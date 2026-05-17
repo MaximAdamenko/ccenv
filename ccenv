@@ -1,0 +1,417 @@
+#!/usr/bin/env python3
+"""
+ccenv — A minimal Claude Code environment manager.
+
+Reads a per-profile YAML declaration from ~/.ccenv/profiles/<name>/ and
+materialises it into ~/.claude/ (CLAUDE.md, mcp.json, skills/). Every
+`apply`/`switch` wipes the managed targets first so no leftovers from
+the previous profile survive.
+
+Secrets are kept in ~/.ccenv/.env (never committed) and substituted
+into {{ NAME }} placeholders inside mcp.json at apply time.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import yaml
+from dotenv import dotenv_values
+
+
+# ---------------------------------------------------------------------------
+# Paths & constants
+# ---------------------------------------------------------------------------
+
+CLAUDE_DIR_NAME   = ".claude"
+CCENV_DIR_NAME    = ".ccenv"
+SECRETS_FILE_NAME = ".env"
+STATE_FILE_NAME   = "state.json"
+PROFILES_DIR_NAME = "profiles"
+
+MANAGED_FILES = ("CLAUDE.md", "mcp.json")
+MANAGED_DIRS  = ("skills",)
+
+SECRET_PATTERN = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Config:
+    home: Path
+
+    @property
+    def claude_dir(self) -> Path:
+        return self.home / CLAUDE_DIR_NAME
+
+    @property
+    def ccenv_dir(self) -> Path:
+        return self.home / CCENV_DIR_NAME
+
+    @property
+    def profiles_dir(self) -> Path:
+        return self.ccenv_dir / PROFILES_DIR_NAME
+
+    @property
+    def secrets_file(self) -> Path:
+        return self.ccenv_dir / SECRETS_FILE_NAME
+
+    @property
+    def state_file(self) -> Path:
+        return self.ccenv_dir / STATE_FILE_NAME
+
+
+class CcenvError(Exception):
+    """Top-level error raised by ccenv commands. main() prints and exits 1."""
+
+
+# ---------------------------------------------------------------------------
+# I/O helpers — one responsibility each
+# ---------------------------------------------------------------------------
+
+def _load_yaml(path: Path) -> dict[str, Any]:
+    """Read a YAML file and return it as a dict."""
+    if not path.is_file():
+        raise CcenvError(f"File not found: {path}")
+    with path.open("r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+    if not isinstance(data, dict):
+        raise CcenvError(f"Expected a YAML mapping at {path}, got {type(data).__name__}")
+    return data
+
+
+def _load_env_secrets(env_path: Path) -> dict[str, str]:
+    """Read KEY=VALUE pairs from a .env file. Missing file returns empty dict."""
+    if not env_path.is_file():
+        return {}
+    return {k: str(v) for k, v in dotenv_values(env_path).items() if v is not None}
+
+
+def _read_state(state_path: Path) -> dict[str, Any]:
+    """Return the persisted state dict, or a default if the file is missing."""
+    if not state_path.is_file():
+        return {"active_profile": None}
+    try:
+        return json.loads(state_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise CcenvError(f"State file is corrupt ({state_path}): {exc}") from exc
+
+
+def _write_state(state_path: Path, active: str | None) -> None:
+    """Persist the active profile name to state.json."""
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(
+        json.dumps({"active_profile": active}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Template helpers — one responsibility each
+# ---------------------------------------------------------------------------
+
+def _render_template(template_text: str, secrets: dict[str, str]) -> str:
+    """Replace every {{ NAME }} token with its value from *secrets*."""
+    missing: list[str] = []
+
+    def replace(match: re.Match[str]) -> str:
+        name = match.group(1)
+        if name not in secrets:
+            missing.append(name)
+            return match.group(0)
+        return secrets[name]
+
+    rendered = SECRET_PATTERN.sub(replace, template_text)
+    if missing:
+        raise CcenvError(
+            "Missing secrets in ~/.ccenv/.env: "
+            + ", ".join(sorted(set(missing)))
+            + "\nAdd them and re-run."
+        )
+    return rendered
+
+
+def _validate_json(text: str) -> None:
+    """Raise CcenvError if *text* is not valid JSON."""
+    try:
+        json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise CcenvError(f"Rendered mcp.json is not valid JSON: {exc}") from exc
+
+
+# ---------------------------------------------------------------------------
+# Profile helpers — one responsibility each
+# ---------------------------------------------------------------------------
+
+def _resolve_profile(cfg: Config, name: str) -> Path:
+    """Return the profile directory path, raising CcenvError if absent."""
+    profile_dir = cfg.profiles_dir / name
+    if not profile_dir.is_dir():
+        raise CcenvError(
+            f"Profile '{name}' not found at {profile_dir}.\n"
+            "Run `ccenv init` first, or check the spelling."
+        )
+    return profile_dir
+
+
+def _load_manifest(profile_dir: Path) -> dict[str, Any]:
+    """Read and return profile.yaml as a dict."""
+    return _load_yaml(profile_dir / "profile.yaml")
+
+
+def _resolve_profile_paths(
+    profile_dir: Path, manifest: dict[str, Any]
+) -> tuple[Path, Path, list[str]]:
+    """Extract and validate (instructions_path, mcp_path, skills) from a manifest."""
+    instructions_rel = manifest.get("instructions", "CLAUDE.md")
+    mcp_rel          = manifest.get("mcp_template", "mcp.json")
+    skills           = manifest.get("skills", []) or []
+
+    if not isinstance(skills, list):
+        raise CcenvError("`skills` in profile.yaml must be a list of paths")
+
+    instructions_path = profile_dir / instructions_rel
+    mcp_path          = profile_dir / mcp_rel
+
+    if not instructions_path.is_file():
+        raise CcenvError(f"Instructions file not found: {instructions_path}")
+    if not mcp_path.is_file():
+        raise CcenvError(f"MCP template not found: {mcp_path}")
+
+    return instructions_path, mcp_path, skills
+
+
+def _render_mcp(mcp_path: Path, secrets: dict[str, str]) -> str:
+    """Read the MCP template, substitute secrets, and validate the result as JSON."""
+    rendered = _render_template(mcp_path.read_text(encoding="utf-8"), secrets)
+    _validate_json(rendered)
+    return rendered
+
+
+# ---------------------------------------------------------------------------
+# Disk-write helpers — one responsibility each
+# ---------------------------------------------------------------------------
+
+def _wipe_managed_files(claude_dir: Path) -> None:
+    """Unlink CLAUDE.md and mcp.json inside *claude_dir*."""
+    for name in MANAGED_FILES:
+        target = claude_dir / name
+        if target.is_symlink() or target.is_file():
+            target.unlink()
+
+
+def _wipe_managed_dirs(claude_dir: Path) -> None:
+    """Remove the skills/ directory (or symlink) inside *claude_dir*."""
+    for name in MANAGED_DIRS:
+        target = claude_dir / name
+        if target.is_symlink():
+            target.unlink()
+        elif target.is_dir():
+            shutil.rmtree(target)
+
+
+def _wipe_managed_targets(claude_dir: Path) -> None:
+    """Delete every file and directory that ccenv owns inside ~/.claude/."""
+    if claude_dir.exists() and not claude_dir.is_dir():
+        raise CcenvError(f"{claude_dir} exists but is not a directory")
+    _wipe_managed_files(claude_dir)
+    _wipe_managed_dirs(claude_dir)
+
+
+def _copy_skills(profile_dir: Path, skill_rel_paths: list[str], dest: Path) -> int:
+    """Copy each declared skill directory into *dest*. Returns the count."""
+    dest.mkdir(parents=True, exist_ok=True)
+    count = 0
+    for rel in skill_rel_paths:
+        src = (profile_dir / rel).resolve()
+        if not src.is_dir():
+            raise CcenvError(f"Skill directory not found: {src}")
+        shutil.copytree(src, dest / src.name)
+        count += 1
+    return count
+
+
+def _write_profile(
+    claude_dir: Path,
+    instructions_path: Path,
+    mcp_rendered: str,
+    profile_dir: Path,
+    skills: list[str],
+) -> int:
+    """Wipe managed targets then write CLAUDE.md, mcp.json and skills/. Returns skill count."""
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    _wipe_managed_targets(claude_dir)
+    shutil.copyfile(instructions_path, claude_dir / "CLAUDE.md")
+    (claude_dir / "mcp.json").write_text(mcp_rendered, encoding="utf-8")
+    return _copy_skills(profile_dir, skills, claude_dir / "skills")
+
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+
+def cmd_init(cfg: Config) -> int:
+    """Create ~/.ccenv/{profiles,.env,state.json} and an example profile."""
+    cfg.ccenv_dir.mkdir(parents=True, exist_ok=True)
+    cfg.profiles_dir.mkdir(parents=True, exist_ok=True)
+
+    if not cfg.secrets_file.exists():
+        cfg.secrets_file.write_text(
+            "# Local secrets for ccenv — DO NOT commit this file.\n"
+            "# Profile mcp.json templates reference these by name, e.g. {{ MY_TOKEN }}.\n"
+            "GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx\n"
+            "JENKINS_TOKEN=jnkns_xxxxxxxxxxxxxxxxx\n"
+            "FIGMA_API_KEY=figd_xxxxxxxxxxxxxxxxxxx\n",
+            encoding="utf-8",
+        )
+        try:
+            os.chmod(cfg.secrets_file, 0o600)
+        except OSError:
+            pass
+
+    if not cfg.state_file.exists():
+        _write_state(cfg.state_file, None)
+
+    example = cfg.profiles_dir / "example"
+    if not example.exists():
+        (example / "skills" / "hello-skill").mkdir(parents=True)
+        (example / "profile.yaml").write_text(
+            "name: example\n"
+            "description: Minimal example profile created by `ccenv init`.\n"
+            "instructions: CLAUDE.md\n"
+            "mcp_template: mcp.json\n"
+            "skills:\n"
+            "  - skills/hello-skill\n",
+            encoding="utf-8",
+        )
+        (example / "CLAUDE.md").write_text(
+            "# Example profile\n\nThis is the example profile. Replace it.\n",
+            encoding="utf-8",
+        )
+        (example / "mcp.json").write_text(
+            json.dumps({"mcpServers": {}}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        (example / "skills" / "hello-skill" / "SKILL.md").write_text(
+            "---\nname: hello-skill\ndescription: Placeholder skill.\n---\n\n"
+            "# hello-skill\n\nReplace me.\n",
+            encoding="utf-8",
+        )
+
+    print(f"Initialized ccenv at {cfg.ccenv_dir}")
+    print(f"  profiles dir:  {cfg.profiles_dir}")
+    print(f"  secrets file:  {cfg.secrets_file}")
+    print(f"  state file:    {cfg.state_file}")
+    print("Try:  ccenv apply example")
+    return 0
+
+
+def cmd_apply(cfg: Config, name: str) -> int:
+    """Apply *name* profile to ~/.claude/."""
+    profile_dir = _resolve_profile(cfg, name)
+    manifest    = _load_manifest(profile_dir)
+    instructions_path, mcp_path, skills = _resolve_profile_paths(profile_dir, manifest)
+
+    secrets      = _load_env_secrets(cfg.secrets_file)
+    mcp_rendered = _render_mcp(mcp_path, secrets)
+
+    skill_count = _write_profile(cfg.claude_dir, instructions_path, mcp_rendered, profile_dir, skills)
+    _write_state(cfg.state_file, name)
+
+    print(f"Applied profile '{name}' to {cfg.claude_dir}")
+    print(f"  CLAUDE.md  <- {instructions_path}")
+    print(f"  mcp.json   <- {mcp_path} (rendered)")
+    print(f"  skills/    <- {skill_count} skill(s)")
+    return 0
+
+
+def cmd_switch(cfg: Config, name: str) -> int:
+    """Switch to *name* profile, logging the previous → next transition."""
+    state   = _read_state(cfg.state_file)
+    current = state.get("active_profile")
+    if current == name:
+        print(f"Profile '{name}' is already active. Re-applying.")
+    else:
+        print(f"Switching from '{current or '<none>'}' to '{name}'.")
+    return cmd_apply(cfg, name)
+
+
+def cmd_status(cfg: Config) -> int:
+    """Print the active profile and list all available profiles."""
+    state  = _read_state(cfg.state_file)
+    active = state.get("active_profile")
+    if active is None:
+        print("No profile is active. Run `ccenv apply <profile>`.")
+    else:
+        print(f"Active profile: {active}")
+
+    if cfg.profiles_dir.is_dir():
+        names = sorted(p.name for p in cfg.profiles_dir.iterdir() if p.is_dir())
+        if names:
+            print("Available profiles: " + ", ".join(names))
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="ccenv",
+        description="A minimal Claude Code environment manager.",
+    )
+    parser.add_argument(
+        "--home",
+        type=Path,
+        default=None,
+        help="Override $HOME (used by the test suite).",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("init",   help="Create the ccenv working directory.")
+    p_apply = sub.add_parser("apply",  help="Apply a profile to ~/.claude/.")
+    p_apply.add_argument("profile")
+    p_switch = sub.add_parser("switch", help="Switch to a different profile.")
+    p_switch.add_argument("profile")
+    sub.add_parser("status", help="Show the active profile.")
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args   = parser.parse_args(argv)
+    home   = args.home if args.home is not None else Path(os.path.expanduser("~"))
+    cfg    = Config(home=Path(home).expanduser())
+
+    try:
+        if args.command == "init":
+            return cmd_init(cfg)
+        if args.command == "apply":
+            return cmd_apply(cfg, args.profile)
+        if args.command == "switch":
+            return cmd_switch(cfg, args.profile)
+        if args.command == "status":
+            return cmd_status(cfg)
+    except CcenvError as exc:
+        print(f"ccenv: error: {exc}", file=sys.stderr)
+        return 1
+
+    parser.print_help()
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

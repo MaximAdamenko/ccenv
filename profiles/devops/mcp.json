@@ -1,0 +1,22 @@
+{
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "{{ GITHUB_TOKEN }}"
+      }
+    },
+    "jenkins": {
+      "command": "jenkins-mcp",
+      "env": {
+        "JENKINS_URL": "https://jenkins.example.com",
+        "JENKINS_API_TOKEN": "{{ JENKINS_TOKEN }}"
+      }
+    },
+    "terraform": {
+      "command": "terraform-mcp",
+      "args": ["--workspace", "default"]
+    }
+  }
+}

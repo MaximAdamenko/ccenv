@@ -1,0 +1,7 @@
+name: frontend
+description: Frontend engineer environment — React, TypeScript, Figma.
+instructions: CLAUDE.md
+mcp_template: mcp.json
+skills:
+  - skills/react-conventions
+  - skills/figma-bridge
