@@ -1,0 +1,7 @@
+name: cicd
+description: CI/CD orchestration environment — pipeline design, release management, deployment strategies.
+instructions: CLAUDE.md
+mcp_template: mcp.json
+skills:
+  - skills/pipeline-architect
+  - skills/release-manager

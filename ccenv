@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-ccenv — A minimal Claude Code environment manager.
+ccenv — Claude Code environment manager with isolated per-agent memory.
 
 Reads a per-profile YAML declaration from ~/.ccenv/profiles/<name>/ and
 materialises it into ~/.claude/ (CLAUDE.md, mcp.json, skills/). Every
@@ -9,11 +9,16 @@ the previous profile survive.
 
 Secrets are kept in ~/.ccenv/.env (never committed) and substituted
 into {{ NAME }} placeholders inside mcp.json at apply time.
+
+Each agent also gets an isolated Memory_Logs/ directory under
+~/.ccenv/agents/<name>/Memory_Logs/ so memory never bleeds across
+agent boundaries.
 """
 
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import os
 import re
@@ -36,6 +41,7 @@ CCENV_DIR_NAME    = ".ccenv"
 SECRETS_FILE_NAME = ".env"
 STATE_FILE_NAME   = "state.json"
 PROFILES_DIR_NAME = "profiles"
+AGENTS_DIR_NAME   = "agents"
 
 MANAGED_FILES = ("CLAUDE.md", "mcp.json")
 MANAGED_DIRS  = ("skills",)
@@ -64,12 +70,23 @@ class Config:
         return self.ccenv_dir / PROFILES_DIR_NAME
 
     @property
+    def agents_dir(self) -> Path:
+        return self.ccenv_dir / AGENTS_DIR_NAME
+
+    @property
     def secrets_file(self) -> Path:
         return self.ccenv_dir / SECRETS_FILE_NAME
 
     @property
     def state_file(self) -> Path:
         return self.ccenv_dir / STATE_FILE_NAME
+
+    @property
+    def brief_file(self) -> Path:
+        return self.ccenv_dir / "Brief.md"
+
+    def agent_memory_dir(self, name: str) -> Path:
+        return self.agents_dir / name / "Memory_Logs"
 
 
 class CcenvError(Exception):
@@ -258,6 +275,164 @@ def _write_profile(
 
 
 # ---------------------------------------------------------------------------
+# Memory helpers — per-agent isolated Memory_Logs
+# ---------------------------------------------------------------------------
+
+MEMORY_FILES = ("Context.md", "Checkpoint.md", "Lessons.md", "Preferences.md")
+
+_CONTEXT_TEMPLATE = """\
+# Context — {agent}
+**Last updated:** {date}
+
+*Quick startup snapshot. Read this first instead of scanning all memory files.*
+
+---
+
+## Project Summary
+[To be filled after first session]
+
+## Current Task
+No active task.
+
+## Recent Lessons
+None yet.
+
+## Active Preferences
+None yet.
+
+## My Recent Sessions
+None yet.
+"""
+
+_CHECKPOINT_TEMPLATE = """\
+# Checkpoint — {agent}
+
+*Save/resume complex tasks here.*
+
+---
+
+## Status
+No active task.
+
+## Last Task
+None.
+"""
+
+_LESSONS_TEMPLATE = """\
+# Lessons Learned — {agent}
+
+*Mistakes to avoid, patterns that worked. Append-only — never delete.*
+
+---
+
+<!-- Template for new entries:
+
+## [YYYY-MM-DD] - [Brief title]
+- **Context:** [what happened]
+- **Lesson:** [what to remember]
+- **Apply when:** [future trigger]
+
+-->
+"""
+
+_PREFERENCES_TEMPLATE = """\
+# Preferences — {agent}
+
+*How the user likes things done. Append-only — never delete.*
+
+---
+
+<!-- Template for new entries:
+
+## [Category]
+*[YYYY-MM-DD]*
+- **Preference:** [detail]
+
+-->
+"""
+
+
+def _ensure_agent_memory(cfg: Config, name: str) -> Path:
+    """Create Memory_Logs/ for *name* if it doesn't already exist."""
+    mem_dir = cfg.agent_memory_dir(name)
+    mem_dir.mkdir(parents=True, exist_ok=True)
+    (mem_dir / "Sessions").mkdir(exist_ok=True)
+    (mem_dir / "Notes").mkdir(exist_ok=True)
+    (mem_dir / "Archive").mkdir(exist_ok=True)
+
+    today = datetime.date.today().isoformat()
+    scaffolds = {
+        "Context.md":    _CONTEXT_TEMPLATE.format(agent=name, date=today),
+        "Checkpoint.md": _CHECKPOINT_TEMPLATE.format(agent=name),
+        "Lessons.md":    _LESSONS_TEMPLATE.format(agent=name),
+        "Preferences.md":_PREFERENCES_TEMPLATE.format(agent=name),
+    }
+    for fname, content in scaffolds.items():
+        target = mem_dir / fname
+        if not target.exists():
+            target.write_text(content, encoding="utf-8")
+
+    return mem_dir
+
+
+def _append_session(mem_dir: Path, agent: str, summary: str) -> Path:
+    """Append a session entry to Sessions/Session_YYYY-MM-DD.md."""
+    today = datetime.date.today().isoformat()
+    session_file = mem_dir / "Sessions" / f"Session_{today}.md"
+    header = f"# Session — {today}\n\n**Agent:** {agent}\n\n---\n\n"
+    entry  = f"## Entry\n{summary}\n\n---\n"
+    if session_file.exists():
+        with session_file.open("a", encoding="utf-8") as f:
+            f.write(entry)
+    else:
+        session_file.write_text(header + entry, encoding="utf-8")
+    return session_file
+
+
+def cmd_memory_init(cfg: Config, name: str) -> int:
+    """Scaffold Memory_Logs/ for agent *name*."""
+    mem_dir = _ensure_agent_memory(cfg, name)
+    print(f"Memory initialized for agent '{name}' at {mem_dir}")
+    return 0
+
+
+def cmd_memory_log(cfg: Config, name: str, summary: str) -> int:
+    """Append a session log entry to agent *name*'s Sessions/."""
+    mem_dir = _ensure_agent_memory(cfg, name)
+    sf = _append_session(mem_dir, name, summary)
+    print(f"Logged session for '{name}' → {sf}")
+    return 0
+
+
+def cmd_memory_show(cfg: Config, name: str) -> int:
+    """Print the Context.md of agent *name*."""
+    mem_dir = cfg.agent_memory_dir(name)
+    ctx = mem_dir / "Context.md"
+    if not ctx.is_file():
+        print(f"No memory found for agent '{name}'. Run: ccenv memory init {name}",
+              file=sys.stderr)
+        return 1
+    print(ctx.read_text(encoding="utf-8"))
+    return 0
+
+
+def cmd_memory_list(cfg: Config) -> int:
+    """List all agents that have initialised memory."""
+    agents_dir = cfg.agents_dir
+    if not agents_dir.is_dir():
+        print("No agents with memory yet. Run: ccenv memory init <agent>")
+        return 0
+    agents = sorted(p.name for p in agents_dir.iterdir() if p.is_dir())
+    if not agents:
+        print("No agents with memory yet.")
+    else:
+        print("Agents with isolated memory:")
+        for a in agents:
+            print(f"  {a}  →  {cfg.agent_memory_dir(a)}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Commands
 # ---------------------------------------------------------------------------
 
@@ -282,6 +457,17 @@ def cmd_init(cfg: Config) -> int:
 
     if not cfg.state_file.exists():
         _write_state(cfg.state_file, None)
+
+    cfg.agents_dir.mkdir(parents=True, exist_ok=True)
+
+    # Seed Brief.md shared dashboard
+    if not cfg.brief_file.exists():
+        cfg.brief_file.write_text(
+            "# Brief — ccenv Project Dashboard\n\n"
+            "| Date | Agent | Activity |\n"
+            "| ---- | ----- | -------- |\n",
+            encoding="utf-8",
+        )
 
     example = cfg.profiles_dir / "example"
     if not example.exists():
@@ -328,11 +514,15 @@ def cmd_apply(cfg: Config, name: str) -> int:
 
     skill_count = _write_profile(cfg.claude_dir, instructions_path, mcp_rendered, profile_dir, skills)
     _write_state(cfg.state_file, name)
+    
+    # Ensure agent memory is initialized
+    _ensure_agent_memory(cfg, name)
 
     print(f"Applied profile '{name}' to {cfg.claude_dir}")
     print(f"  CLAUDE.md  <- {instructions_path}")
     print(f"  mcp.json   <- {mcp_path} (rendered)")
     print(f"  skills/    <- {skill_count} skill(s)")
+    print(f"  memory/    <- {cfg.agent_memory_dir(name)}")
     return 0
 
 
@@ -370,7 +560,7 @@ def cmd_status(cfg: Config) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ccenv",
-        description="A minimal Claude Code environment manager.",
+        description="Claude Code environment manager with per-agent memory isolation.",
     )
     parser.add_argument(
         "--home",
@@ -386,6 +576,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_switch = sub.add_parser("switch", help="Switch to a different profile.")
     p_switch.add_argument("profile")
     sub.add_parser("status", help="Show the active profile.")
+
+    # Memory management subcommands
+    p_memory = sub.add_parser("memory", help="Agent memory management.")
+    memory_sub = p_memory.add_subparsers(dest="memory_command", required=True)
+    
+    p_mem_init = memory_sub.add_parser("init", help="Initialize Memory_Logs for an agent.")
+    p_mem_init.add_argument("agent")
+    
+    p_mem_log = memory_sub.add_parser("log", help="Log a session entry for an agent.")
+    p_mem_log.add_argument("agent")
+    p_mem_log.add_argument("summary")
+    
+    p_mem_show = memory_sub.add_parser("show", help="Show Context.md for an agent.")
+    p_mem_show.add_argument("agent")
+    
+    memory_sub.add_parser("list", help="List all agents with initialized memory.")
 
     return parser
 
@@ -405,6 +611,15 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_switch(cfg, args.profile)
         if args.command == "status":
             return cmd_status(cfg)
+        if args.command == "memory":
+            if args.memory_command == "init":
+                return cmd_memory_init(cfg, args.agent)
+            if args.memory_command == "log":
+                return cmd_memory_log(cfg, args.agent, args.summary)
+            if args.memory_command == "show":
+                return cmd_memory_show(cfg, args.agent)
+            if args.memory_command == "list":
+                return cmd_memory_list(cfg)
     except CcenvError as exc:
         print(f"ccenv: error: {exc}", file=sys.stderr)
         return 1
