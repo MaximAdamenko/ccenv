@@ -90,6 +90,7 @@ ln -s "$PWD/ccenv" /usr/local/bin/ccenv
 | `ccenv apply <profile>`         | Wipe managed contents of `~/.claude/`, write profile + init memory |
 | `ccenv switch <profile>`        | Same as apply; logs the previous → next switch                   |
 | `ccenv status`                  | Show the active profile and list available profiles               |
+| `ccenv chat`                    | Start interactive chat session with the active agent              |
 | `ccenv memory init <agent>`     | Initialize Memory_Logs for an agent                              |
 | `ccenv memory log <agent> "<summary>"` | Append a session entry to agent's Sessions/                |
 | `ccenv memory show <agent>`     | Print the Context.md snapshot for an agent                       |
@@ -167,6 +168,42 @@ ccenv memory show devops
 ccenv memory list
 ```
 
+### Interactive Chat with Your Agent
+
+Start an interactive chat session with the active agent:
+
+```bash
+ccenv apply devops
+ccenv chat
+```
+
+This loads the agent's instructions + memory and opens an interactive prompt:
+
+```
+======================================================================
+Agent: DEVOPS
+Memory: /Users/maximus/.ccenv/agents/devops/Memory_Logs
+======================================================================
+
+Instructions:
+----------------------------------------------------------------------
+# DevOps Profile
+
+You are pairing with a DevOps engineer doing infrastructure automation
+and CI/CD operations.
+
+... [full instructions] ...
+
+----------------------------------------------------------------------
+
+Chat Mode (type 'exit' or 'quit' to end session)
+>>> Tell me how to provision an RDS instance
+[Agent response here]
+>>>
+```
+
+Your conversation is automatically logged to the agent's `Sessions/` when you exit.
+
 ### Key Rules
 
 - **Memory is isolated:** When you switch agents, the new agent reads their own memory, **not** the previous agent's. No bleed.
@@ -207,35 +244,40 @@ Deploy a feature from start to finish:
 1. **Start with Frontend Agent** — Build the UI component
    ```bash
    ccenv switch frontend
-   # ... build component, iterate with Figma ...
-   ccenv memory log frontend "Built UserCard component with design tokens"
+   ccenv chat
+   # ... Chat with frontend agent about component design ...
+   # Type 'exit' to end session (auto-logs to memory)
    ```
 
 2. **Switch to DevOps** — Provision any new infrastructure
    ```bash
    ccenv switch devops  # DevOps memory loads auto, Frontend memory is isolated
-   # ... review terraform needs, provision RDS if needed ...
-   ccenv memory log devops "Provisioned RDS instance, updated security groups"
+   ccenv chat
+   # ... Chat with DevOps agent about infrastructure needs ...
+   # Type 'exit' when done
    ```
 
 3. **Switch to CI/CD** — Design the release
    ```bash
    ccenv switch cicd  # CI/CD memory loads, DevOps memory stays isolated
-   # ... plan canary deployment, write release notes ...
-   ccenv memory log cicd "Designed canary rollout: 5% → 25% → 100% over 2 hours"
+   ccenv chat
+   # ... Chat with CI/CD architect about deployment strategy ...
+   # Type 'exit' when done
    ```
 
 4. **View Project Status**
    ```bash
    cat Brief.md      # See who did what, upcoming milestones
    cat Registry.md   # Understand which agent to switch to next
+   ccenv memory list # See all agents' memory status
    ```
 
 5. **Next Session** — Agents remember context
    ```bash
    ccenv switch devops
-   ccenv memory show devops  # Sees your last checkpoint, lessons, preferences
-   # ... continue from where you left off ...
+   ccenv chat
+   # DevOps agent loads their Context.md, sessions, lessons, preferences
+   # You pick up exactly where you left off
    ```
 
 Each agent's memory is **completely isolated**—no context pollution when switching.
