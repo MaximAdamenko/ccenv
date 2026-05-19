@@ -2,20 +2,11 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 from pathlib import Path
 
 from .config import Config
-from .deployment import write_profile
-from .memory import ensure_agent_memory
-from .profiles import (
-    load_manifest,
-    render_mcp,
-    resolve_profile,
-    resolve_profile_paths,
-)
-from .storage import load_env_secrets, read_state, write_state
-from .ccenvManager import ChatSession
+from .ccenvManager import CcenvManager
+from .storage import read_state, write_state
 
 
 def cmd_init(cfg: Config) -> int:
@@ -86,39 +77,7 @@ def cmd_init(cfg: Config) -> int:
 
 
 def cmd_apply(cfg: Config, name: str, chat: bool = True) -> int:
-    profile_dir = resolve_profile(cfg, name)
-    manifest = load_manifest(profile_dir)
-    instructions_path, mcp_path, skills = resolve_profile_paths(profile_dir, manifest)
-
-    secrets = load_env_secrets(cfg.secrets_file)
-    mcp_rendered = render_mcp(mcp_path, secrets)
-
-    skill_count = write_profile(
-        cfg.claude_dir,
-        instructions_path,
-        mcp_rendered,
-        profile_dir,
-        skills,
-    )
-    write_state(cfg.state_file, name)
-    ensure_agent_memory(cfg, name)
-
-    print(f"Applied profile '{name}' to {cfg.claude_dir}")
-    print(f"  CLAUDE.md  <- {instructions_path}")
-    print(f"  mcp.json   <- {mcp_path} (rendered)")
-    print(f"  skills/    <- {skill_count} skill(s)")
-    print(f"  memory/    <- {cfg.agent_memory_dir(name)}")
-
-    if chat and sys.stdin.isatty():
-        try:
-            session = ChatSession(cfg)
-            return session.run()
-        except Exception as exc:
-            print(f"Error starting chat: {exc}", file=sys.stderr)
-            return 1
-    if chat:
-        print("Skipping interactive chat because stdin is not a TTY.")
-    return 0
+    return CcenvManager(cfg).apply(name, chat=chat)
 
 
 def cmd_switch(cfg: Config, name: str, chat: bool = True) -> int:
@@ -128,7 +87,7 @@ def cmd_switch(cfg: Config, name: str, chat: bool = True) -> int:
         print(f"Profile '{name}' is already active. Re-applying.")
     else:
         print(f"Switching from '{current or '<none>'}' to '{name}'.")
-    return cmd_apply(cfg, name, chat=chat)
+    return CcenvManager(cfg).apply(name, chat=chat)
 
 
 def cmd_status(cfg: Config) -> int:

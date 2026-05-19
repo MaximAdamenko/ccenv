@@ -61,7 +61,7 @@ def _tool_block(name: str, inp: dict, bid: str = "t1"):
 
 def _make_session(tmp_path: Path):
     """Build a ChatSession bypassing __init__ — no real API key or profile needed."""
-    from ccenv_pkg.ccenvManager import ChatSession
+    from ccenv_pkg.chat import ChatSession
     from ccenv_pkg.config import Config
     from ccenv_pkg.tools import ToolExecutor
 
@@ -183,7 +183,7 @@ def test_no_ansi_codes_in_non_tty(tmp_path, monkeypatch, capsys):
 # ---------------------------------------------------------------------------
 
 def test_spinner_noop_outside_tty(tmp_path, monkeypatch):
-    from ccenv_pkg.ccenvManager import Spinner
+    from ccenv_pkg.chat import Spinner
 
     # Ensure isatty returns False
     monkeypatch.setattr(sys.stdout, "isatty", lambda: False)
@@ -199,7 +199,7 @@ def test_spinner_noop_outside_tty(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_tool_status_label_variants():
-    from ccenv_pkg.ccenvManager import _tool_status_label
+    from ccenv_pkg.chat import _tool_status_label
 
     assert _tool_status_label("write_file", {"path": "a.txt"}) == "Writing file: a.txt"
     assert _tool_status_label("read_file", {"path": "b.txt"}) == "Reading file: b.txt"
@@ -210,7 +210,7 @@ def test_tool_status_label_variants():
 
 
 def test_tool_status_detail_success():
-    from ccenv_pkg.ccenvManager import _tool_status_detail
+    from ccenv_pkg.chat import _tool_status_detail
 
     assert "KB" in _tool_status_detail("write_file", {"status": "success", "bytes_written": 2048})
     assert "B" in _tool_status_detail("write_file", {"status": "success", "bytes_written": 50})
@@ -222,7 +222,7 @@ def test_tool_status_detail_success():
 
 
 def test_tool_status_detail_error():
-    from ccenv_pkg.ccenvManager import _tool_status_detail
+    from ccenv_pkg.chat import _tool_status_detail
 
     r = _tool_status_detail("write_file", {"status": "error", "message": "no space"})
     assert r.startswith("✗")
@@ -230,7 +230,7 @@ def test_tool_status_detail_error():
 
 
 def test_tool_status_detail_rejected():
-    from ccenv_pkg.ccenvManager import _tool_status_detail
+    from ccenv_pkg.chat import _tool_status_detail
 
     r = _tool_status_detail("run_command", {"status": "rejected_by_user"})
     assert "rejected" in r

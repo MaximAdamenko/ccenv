@@ -18,7 +18,7 @@ from ccenv_pkg.chat import cmd_chat
 from ccenv_pkg.commands import cmd_apply, cmd_init, cmd_status, cmd_switch
 from ccenv_pkg.config import CcenvError, Config
 from ccenv_pkg.memory import cmd_memory_init, cmd_memory_list, cmd_memory_log, cmd_memory_show
-from ccenv_pkg.ccenvManager import ChatSession, load_active_profile_config, build_system_prompt
+from ccenv_pkg.chat import ChatSession, load_active_profile_config, build_system_prompt
 from ccenv_pkg.profiles import render_template as _render_template
 from ccenv_pkg.cli import build_parser
 
