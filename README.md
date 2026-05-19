@@ -170,11 +170,10 @@ ccenv memory list
 
 ### Interactive Chat with Your Agent
 
-Start an interactive chat session with the active agent:
+Start an interactive chat session with the active agent immediately after applying a profile:
 
 ```bash
-ccenv apply devops
-ccenv chat
+ccenv apply devops --chat
 ```
 
 This loads the agent's instructions + memory and opens an interactive prompt:
@@ -243,24 +242,21 @@ Deploy a feature from start to finish:
 
 1. **Start with Frontend Agent** — Build the UI component
    ```bash
-   ccenv switch frontend
-   ccenv chat
+   ccenv apply frontend --chat
    # ... Chat with frontend agent about component design ...
    # Type 'exit' to end session (auto-logs to memory)
    ```
 
 2. **Switch to DevOps** — Provision any new infrastructure
    ```bash
-   ccenv switch devops  # DevOps memory loads auto, Frontend memory is isolated
-   ccenv chat
+   ccenv switch devops --chat  # DevOps memory loads auto, Frontend memory is isolated
    # ... Chat with DevOps agent about infrastructure needs ...
    # Type 'exit' when done
    ```
 
 3. **Switch to CI/CD** — Design the release
    ```bash
-   ccenv switch cicd  # CI/CD memory loads, DevOps memory stays isolated
-   ccenv chat
+   ccenv switch cicd --chat  # CI/CD memory loads, DevOps memory stays isolated
    # ... Chat with CI/CD architect about deployment strategy ...
    # Type 'exit' when done
    ```

@@ -31,6 +31,12 @@ from typing import Any
 import yaml
 from dotenv import dotenv_values
 
+try:
+    from anthropic import Anthropic
+    ANTHROPIC_AVAILABLE = True
+except ImportError:
+    ANTHROPIC_AVAILABLE = False
+
 
 # ---------------------------------------------------------------------------
 # Paths & constants
@@ -445,6 +451,7 @@ def cmd_init(cfg: Config) -> int:
         cfg.secrets_file.write_text(
             "# Local secrets for ccenv — DO NOT commit this file.\n"
             "# Profile mcp.json templates reference these by name, e.g. {{ MY_TOKEN }}.\n"
+            "CLAUDE_API_KEY=sk_xxxxxxxxxxxxxxxxxxxx\n"
             "GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx\n"
             "JENKINS_TOKEN=jnkns_xxxxxxxxxxxxxxxxx\n"
             "FIGMA_API_KEY=figd_xxxxxxxxxxxxxxxxxxx\n",
@@ -503,7 +510,7 @@ def cmd_init(cfg: Config) -> int:
     return 0
 
 
-def cmd_apply(cfg: Config, name: str) -> int:
+def cmd_apply(cfg: Config, name: str, chat: bool = False) -> int:
     """Apply *name* profile to ~/.claude/."""
     profile_dir = _resolve_profile(cfg, name)
     manifest    = _load_manifest(profile_dir)
@@ -523,10 +530,23 @@ def cmd_apply(cfg: Config, name: str) -> int:
     print(f"  mcp.json   <- {mcp_path} (rendered)")
     print(f"  skills/    <- {skill_count} skill(s)")
     print(f"  memory/    <- {cfg.agent_memory_dir(name)}")
+
+    if chat:
+        return cmd_chat(cfg)
+
     return 0
 
 
-def cmd_switch(cfg: Config, name: str) -> int:
+def cmd_switch(cfg: Config, name: str, chat: bool = False) -> int:
+    """Switch to *name* profile, logging the previous → next transition."""
+    state   = _read_state(cfg.state_file)
+    current = state.get("active_profile")
+    if current == name:
+        print(f"Profile '{name}' is already active. Re-applying.")
+    else:
+        print(f"Switching from '{current or '<none>'}' to '{name}'.")
+    return cmd_apply(cfg, name, chat=chat)
+
     """Switch to *name* profile, logging the previous → next transition."""
     state   = _read_state(cfg.state_file)
     current = state.get("active_profile")
@@ -538,7 +558,12 @@ def cmd_switch(cfg: Config, name: str) -> int:
 
 
 def cmd_chat(cfg: Config) -> int:
-    """Start an interactive chat session with the active agent."""
+    """Start an interactive chat session with Claude as the active agent."""
+    if not ANTHROPIC_AVAILABLE:
+        print("anthropic library not installed. Run: pip install -r requirements.txt",
+              file=sys.stderr)
+        return 1
+    
     state = _read_state(cfg.state_file)
     active = state.get("active_profile")
     
@@ -553,34 +578,97 @@ def cmd_chat(cfg: Config) -> int:
     instructions = instructions_path.read_text(encoding="utf-8")
     mem_dir = cfg.agent_memory_dir(active)
     
+    # Load memory context
+    context_file = mem_dir / "Context.md"
+    context_text = context_file.read_text(encoding="utf-8") if context_file.is_file() else "[No context yet]"
+    
+    # Get API key
+    secrets = _load_env_secrets(cfg.secrets_file)
+    api_key = secrets.get("CLAUDE_API_KEY")
+    
+    if not api_key:
+        print("CLAUDE_API_KEY not found in ~/.ccenv/.env", file=sys.stderr)
+        return 1
+    
+    # Build system prompt
+    system_prompt = f"""{instructions}
+
+---
+
+## Your Memory (Persistent Across Sessions)
+
+{context_text}
+
+---
+
+## Instructions for This Session
+- You are this agent. Embody their expertise and personality.
+- Reference your memory when relevant.
+- Log important lessons back via "ccenv memory log <agent>"
+- When done, type 'exit' or 'quit' to end the chat.
+"""
+    
     print(f"\n{'='*70}")
     print(f"Agent: {active.upper()}")
+    print(f"Claude API: Connected ✓")
     print(f"Memory: {mem_dir}")
     print(f"{'='*70}\n")
-    print("Instructions:")
-    print("-" * 70)
-    print(instructions)
-    print("-" * 70)
-    print("\nChat Mode (type 'exit' or 'quit' to end session)")
-    print(f">>> ", end="", flush=True)
     
-    conversation: list[str] = []
+    client = Anthropic(api_key=api_key)
+    conversation_history = []
+    
+    print("Chat Mode (type 'exit' or 'quit' to end session)\n")
+    
     while True:
-        user_input = input().strip()
+        try:
+            user_input = input(f"{active}> ").strip()
+        except EOFError:
+            break
+        
         if user_input.lower() in ("exit", "quit", "bye"):
             break
+        
         if not user_input:
-            print(">>> ", end="", flush=True)
             continue
         
-        conversation.append(f"You: {user_input}")
-        print(f"\n[Agent '{active}' would respond here in a real implementation]")
-        print(f">>> ", end="", flush=True)
+        # Add user message to history
+        conversation_history.append({
+            "role": "user",
+            "content": user_input
+        })
+        
+        # Call Claude API
+        try:
+            response = client.messages.create(
+                model="claude-3-5-sonnet-20241022",
+                max_tokens=2048,
+                system=system_prompt,
+                messages=conversation_history
+            )
+            
+            assistant_message = response.content[0].text
+            
+            # Add assistant response to history
+            conversation_history.append({
+                "role": "assistant",
+                "content": assistant_message
+            })
+            
+            print(f"\n{assistant_message}\n")
+        
+        except Exception as e:
+            print(f"\n✗ Error calling Claude API: {e}\n", file=sys.stderr)
+            # Remove the failed user message from history
+            conversation_history.pop()
     
     # Log the session
-    if conversation:
-        session_summary = f"Chat session with {len(conversation)} message(s)"
-        _append_session(mem_dir, active, "\n".join(conversation))
+    if conversation_history:
+        session_content = "## Conversation\n\n"
+        for msg in conversation_history:
+            role = msg["role"].capitalize()
+            session_content += f"\n**{role}:**\n{msg['content']}\n"
+        
+        _append_session(mem_dir, active, session_content)
         print(f"\n✓ Session logged to {mem_dir}/Sessions/")
     
     return 0
@@ -622,8 +710,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("init",   help="Create the ccenv working directory.")
     p_apply = sub.add_parser("apply",  help="Apply a profile to ~/.claude/.")
     p_apply.add_argument("profile")
+    p_apply.add_argument("--chat", action="store_true", help="Launch chat immediately after applying the profile.")
     p_switch = sub.add_parser("switch", help="Switch to a different profile.")
     p_switch.add_argument("profile")
+    p_switch.add_argument("--chat", action="store_true", help="Launch chat immediately after switching profiles.")
     sub.add_parser("status", help="Show the active profile.")
     sub.add_parser("chat",   help="Start interactive chat with active agent.")
 
@@ -656,9 +746,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "init":
             return cmd_init(cfg)
         if args.command == "apply":
-            return cmd_apply(cfg, args.profile)
+            return cmd_apply(cfg, args.profile, chat=args.chat)
         if args.command == "switch":
-            return cmd_switch(cfg, args.profile)
+            return cmd_switch(cfg, args.profile, chat=args.chat)
         if args.command == "status":
             return cmd_status(cfg)
         if args.command == "chat":
