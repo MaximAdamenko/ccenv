@@ -510,7 +510,7 @@ def cmd_init(cfg: Config) -> int:
     return 0
 
 
-def cmd_apply(cfg: Config, name: str, chat: bool = False) -> int:
+def cmd_apply(cfg: Config, name: str, chat: bool = True) -> int:
     """Apply *name* profile to ~/.claude/."""
     profile_dir = _resolve_profile(cfg, name)
     manifest    = _load_manifest(profile_dir)
@@ -537,7 +537,7 @@ def cmd_apply(cfg: Config, name: str, chat: bool = False) -> int:
     return 0
 
 
-def cmd_switch(cfg: Config, name: str, chat: bool = False) -> int:
+def cmd_switch(cfg: Config, name: str, chat: bool = True) -> int:
     """Switch to *name* profile, logging the previous → next transition."""
     state   = _read_state(cfg.state_file)
     current = state.get("active_profile")
@@ -708,12 +708,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("init",   help="Create the ccenv working directory.")
-    p_apply = sub.add_parser("apply",  help="Apply a profile to ~/.claude/.")
+    p_apply = sub.add_parser("apply",  help="Apply a profile to ~/.claude/ and launch chat.")
     p_apply.add_argument("profile")
-    p_apply.add_argument("--chat", action="store_true", help="Launch chat immediately after applying the profile.")
-    p_switch = sub.add_parser("switch", help="Switch to a different profile.")
+    p_apply.add_argument("--no-chat", action="store_true", help="Apply the profile without launching chat.")
+    p_switch = sub.add_parser("switch", help="Switch to a different profile and launch chat.")
     p_switch.add_argument("profile")
-    p_switch.add_argument("--chat", action="store_true", help="Launch chat immediately after switching profiles.")
+    p_switch.add_argument("--no-chat", action="store_true", help="Switch profiles without launching chat.")
     sub.add_parser("status", help="Show the active profile.")
     sub.add_parser("chat",   help="Start interactive chat with active agent.")
 
@@ -746,9 +746,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "init":
             return cmd_init(cfg)
         if args.command == "apply":
-            return cmd_apply(cfg, args.profile, chat=args.chat)
+            return cmd_apply(cfg, args.profile, chat=not args.no_chat)
         if args.command == "switch":
-            return cmd_switch(cfg, args.profile, chat=args.chat)
+            return cmd_switch(cfg, args.profile, chat=not args.no_chat)
         if args.command == "status":
             return cmd_status(cfg)
         if args.command == "chat":
