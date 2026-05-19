@@ -24,7 +24,7 @@ import pytest
 # ---------------------------------------------------------------------------
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CCENV_PATH = REPO_ROOT / "main"
+CCENV_PATH = REPO_ROOT / "ccenv"
 
 loader = SourceFileLoader("ccenv", str(CCENV_PATH))
 spec = importlib.util.spec_from_loader("ccenv", loader)
@@ -56,6 +56,7 @@ def _make_profile(
     mcp=None,
     skills=None,
     instructions: str | None = None,
+    model: str | None = None,
 ) -> Path:
     """Construct a tiny profile directory inside *profiles_dir*."""
     p = profiles_dir / name
@@ -81,6 +82,7 @@ def _make_profile(
         f"description: {name} profile",
         "instructions: CLAUDE.md",
         "mcp_template: mcp.json",
+        *([f"model: {model}"] if model is not None else []),
         "skills:",
         *[f"  - {sp}" for sp in skill_rel],
     ]
@@ -401,3 +403,175 @@ def test_main_defaults_home_to_expanduser(monkeypatch, tmp_path):
     rc = ccenv.main(["init"])
     assert rc == 0
     assert str(captured["cfg"].home) == str(fake)
+
+
+# ---------------------------------------------------------------------------
+# Model resolution
+# ---------------------------------------------------------------------------
+
+def test_resolve_model_falls_back_to_default_when_not_set(home: Path):
+    _run(home, "init")
+    _make_profile(home / ".ccenv" / "profiles", "nomodel")  # no model field
+    _run(home, "apply", "nomodel")
+
+    from ccenv_pkg.profiles import resolve_model
+    from ccenv_pkg.config import DEFAULT_MODEL
+    from ccenv_pkg.storage import load_yaml
+
+    manifest = load_yaml(home / ".ccenv" / "profiles" / "nomodel" / "profile.yaml")
+    assert resolve_model(manifest) == DEFAULT_MODEL
+
+
+def test_resolve_model_reads_explicit_model_from_profile(home: Path):
+    _run(home, "init")
+    _make_profile(home / ".ccenv" / "profiles", "heavymodel", model="claude-opus-4-7")
+    _run(home, "apply", "heavymodel")
+
+    from ccenv_pkg.profiles import resolve_model
+    from ccenv_pkg.storage import load_yaml
+
+    manifest = load_yaml(home / ".ccenv" / "profiles" / "heavymodel" / "profile.yaml")
+    assert resolve_model(manifest) == "claude-opus-4-7"
+
+
+# ---------------------------------------------------------------------------
+# Output directory resolution
+# ---------------------------------------------------------------------------
+
+def test_resolve_output_dir_default(tmp_path):
+    from ccenv_pkg.config import Config
+    from ccenv_pkg.profiles import resolve_output_dir
+
+    cfg = Config(home=tmp_path)
+    result = resolve_output_dir(cfg, "myagent", {})
+    assert result == cfg.ccenv_dir / "output" / "myagent"
+
+
+def test_resolve_output_dir_custom_relative(tmp_path):
+    from ccenv_pkg.config import Config
+    from ccenv_pkg.profiles import resolve_output_dir
+
+    cfg = Config(home=tmp_path)
+    result = resolve_output_dir(cfg, "myagent", {"output_dir": "custom/outputs"})
+    assert result == tmp_path / "custom" / "outputs"
+
+
+# ---------------------------------------------------------------------------
+# ToolExecutor
+# ---------------------------------------------------------------------------
+
+def test_tool_executor_write_file_success(tmp_path):
+    from ccenv_pkg.config import Config
+    from ccenv_pkg.tools import ToolExecutor
+
+    cfg = Config(home=tmp_path)
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    executor = ToolExecutor(cfg, output_dir)
+
+    result = executor.execute("write_file", {"path": "hello.txt", "content": "world"})
+    assert result["status"] == "success"
+    assert (output_dir / "hello.txt").read_text() == "world"
+    assert result["bytes_written"] == 5
+
+
+def test_tool_executor_write_file_traversal_rejected(tmp_path):
+    from ccenv_pkg.config import Config
+    from ccenv_pkg.tools import ToolExecutor
+
+    cfg = Config(home=tmp_path)
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    executor = ToolExecutor(cfg, output_dir)
+
+    result = executor.execute("write_file", {"path": "../escape.txt", "content": "bad"})
+    assert result["status"] == "error"
+    assert "escapes" in result["message"] or "traversal" in result["message"]
+    assert not (tmp_path / "escape.txt").exists()
+
+
+def test_tool_executor_write_file_absolute_rejected(tmp_path):
+    from ccenv_pkg.config import Config
+    from ccenv_pkg.tools import ToolExecutor
+
+    cfg = Config(home=tmp_path)
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    executor = ToolExecutor(cfg, output_dir)
+
+    result = executor.execute("write_file", {"path": "/etc/passwd", "content": "bad"})
+    assert result["status"] == "error"
+    assert "Absolute" in result["message"]
+
+
+def test_tool_executor_read_file_not_found(tmp_path):
+    from ccenv_pkg.config import Config
+    from ccenv_pkg.tools import ToolExecutor
+
+    cfg = Config(home=tmp_path)
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    executor = ToolExecutor(cfg, output_dir)
+
+    result = executor.execute("read_file", {"path": "nonexistent.txt"})
+    assert result["status"] == "error"
+    assert "not found" in result["message"]
+
+
+def test_tool_executor_read_file_roundtrip(tmp_path):
+    from ccenv_pkg.config import Config
+    from ccenv_pkg.tools import ToolExecutor
+
+    cfg = Config(home=tmp_path)
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    executor = ToolExecutor(cfg, output_dir)
+
+    executor.execute("write_file", {"path": "data.txt", "content": "hello"})
+    result = executor.execute("read_file", {"path": "data.txt"})
+    assert result["status"] == "success"
+    assert result["content"] == "hello"
+
+
+def test_tool_executor_switch_agent_invalid_profile(tmp_path):
+    from ccenv_pkg.config import Config
+    from ccenv_pkg.tools import ToolExecutor
+
+    cfg = Config(home=tmp_path)
+    cfg.profiles_dir.mkdir(parents=True)
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    executor = ToolExecutor(cfg, output_dir)
+
+    result = executor.execute("switch_agent", {"name": "nonexistent"})
+    assert result["status"] == "error"
+    assert "not found" in result["message"]
+
+
+def test_tool_executor_switch_agent_valid_profile(tmp_path):
+    from ccenv_pkg.config import Config
+    from ccenv_pkg.tools import ToolExecutor
+
+    cfg = Config(home=tmp_path)
+    (cfg.profiles_dir / "devops").mkdir(parents=True)
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    executor = ToolExecutor(cfg, output_dir)
+
+    result = executor.execute("switch_agent", {"name": "devops"})
+    assert result["status"] == "switch_agent"
+    assert result["name"] == "devops"
+
+
+def test_tool_executor_unknown_tool(tmp_path):
+    from ccenv_pkg.config import Config
+    from ccenv_pkg.tools import ToolExecutor
+
+    cfg = Config(home=tmp_path)
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    executor = ToolExecutor(cfg, output_dir)
+
+    result = executor.execute("nonexistent_tool", {})
+    assert result["status"] == "error"
+    assert "Unknown tool" in result["message"]

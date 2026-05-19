@@ -1,7 +1,0 @@
-name: devops
-description: DevOps engineer environment — Terraform, Jenkins, GitHub.
-instructions: CLAUDE.md
-mcp_template: mcp.json
-skills:
-  - skills/terraform-helper
-  - skills/jenkins-runner

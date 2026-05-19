@@ -16,6 +16,8 @@ MANAGED_DIRS = ("skills",)
 
 SECRET_PATTERN = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*\}\}")
 
+DEFAULT_MODEL = "claude-sonnet-4-6"
+
 
 @dataclass(frozen=True)
 class Config:

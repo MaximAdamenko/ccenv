@@ -3,9 +3,12 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
-from .config import CcenvError, SECRET_PATTERN
+from .config import CcenvError, DEFAULT_MODEL, SECRET_PATTERN
+
+if TYPE_CHECKING:
+    from .config import Config
 from .storage import load_yaml
 
 
@@ -67,6 +70,20 @@ def resolve_profile_paths(profile_dir: Path, manifest: dict[str, Any]) -> tuple[
         raise CcenvError(f"MCP template not found: {mcp_path}")
 
     return instructions_path, mcp_path, skills
+
+
+def resolve_model(manifest: dict[str, Any]) -> str:
+    return manifest.get("model") or DEFAULT_MODEL
+
+
+def resolve_output_dir(cfg: "Config", agent_name: str, manifest: dict[str, Any]) -> Path:
+    custom = manifest.get("output_dir")
+    if custom:
+        p = Path(custom).expanduser()
+        if not p.is_absolute():
+            p = cfg.home / p
+        return p
+    return cfg.ccenv_dir / "output" / agent_name
 
 
 def render_mcp(mcp_path: Path, secrets: dict[str, str]) -> str:

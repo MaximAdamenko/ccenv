@@ -4,4 +4,9 @@ __pycache__/
 .venv/
 venv/
 .DS_Store
+
+# ccenv user data — must live in ~/.ccenv/, never in the repo
 .env
+/profiles/
+/Brief.md
+/.ccenv/

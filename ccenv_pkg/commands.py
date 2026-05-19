@@ -22,8 +22,9 @@ def cmd_init(cfg: Config) -> int:
     cfg.ccenv_dir.mkdir(parents=True, exist_ok=True)
     cfg.profiles_dir.mkdir(parents=True, exist_ok=True)
 
-    if not cfg.secrets_file.exists():
-        cfg.secrets_file.write_text(
+    ccenv_env = cfg.ccenv_dir / ".env"
+    if not ccenv_env.exists():
+        ccenv_env.write_text(
             "# Local secrets for ccenv — DO NOT commit this file.\n"
             "# Profile mcp.json templates reference these by name, e.g. {{ MY_TOKEN }}.\n"
             "CLAUDE_API_KEY=sk_xxxxxxxxxxxxxxxxxxxx\n"
@@ -33,7 +34,7 @@ def cmd_init(cfg: Config) -> int:
             encoding="utf-8",
         )
         try:
-            os.chmod(cfg.secrets_file, 0o600)
+            os.chmod(ccenv_env, 0o600)
         except OSError:
             pass
 
