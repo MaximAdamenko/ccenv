@@ -19,12 +19,12 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# Load the CLI by path — the executable is called `ccenv` (no .py extension),
+# Load the CLI by path — the executable is called `main` (no .py extension),
 # so spec_from_file_location can't infer a loader and we have to supply one.
 # ---------------------------------------------------------------------------
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-CCENV_PATH = REPO_ROOT / "ccenv"
+CCENV_PATH = REPO_ROOT / "main"
 
 loader = SourceFileLoader("ccenv", str(CCENV_PATH))
 spec = importlib.util.spec_from_loader("ccenv", loader)
